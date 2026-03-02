@@ -18,6 +18,7 @@ Requisitos:
 
 import threading
 import time
+import queue
 from datetime import datetime, timedelta
 from pathlib import Path
 import json
@@ -96,6 +97,10 @@ HTTP_HEADERS = {
     "Accept":     "application/json,text/plain,*/*",
     "Connection": "keep-alive",
 }
+
+# ── SESIÓN HTTP (reutiliza conexiones TCP) ───────────────────────────────────
+_http_session = requests.Session()
+_http_session.headers.update(HTTP_HEADERS)
 
 # ── PERSISTENCIA ROI + POLY ───────────────────────────────────────────────────
 def save_roi_poly(monitor_index, roi_xywh, poly):
@@ -256,6 +261,51 @@ def _save_state():
 
 _load_state()
 
+# ── COLA Y WORKER DE WEBHOOKS ────────────────────────────────────────────────
+_wh_queue        = queue.Queue(maxsize=50)
+_WH_MAX_RETRIES  = 3
+_WH_RETRY_DELAY  = 0.5   # seg entre reintentos
+_wh_results      = {}     # track_id -> {"status": "pending"|"ok"|"fail", "retries": int}
+_wh_results_lock = threading.Lock()
+
+
+def _wh_worker(engine_ref):
+    """Worker persistente: procesa webhooks de la cola con reintentos."""
+    while True:
+        try:
+            item = _wh_queue.get(timeout=2.0)
+        except queue.Empty:
+            continue
+
+        if item is None:          # Poison pill → salir
+            break
+
+        track_id, tag, retries = item
+        ok, reason, ms = pulso_subir()
+
+        with _wh_results_lock:
+            if ok:
+                _wh_results[track_id] = {"status": "ok", "retries": retries}
+                if engine_ref:
+                    engine_ref.set_wh(f"{tag} OK:{reason} ({ms}ms)")
+            else:
+                if retries < _WH_MAX_RETRIES:
+                    _wh_results[track_id] = {"status": "pending", "retries": retries + 1}
+                    time.sleep(_WH_RETRY_DELAY)
+                    try:
+                        _wh_queue.put_nowait((track_id, tag, retries + 1))
+                    except queue.Full:
+                        _wh_results[track_id] = {"status": "fail", "retries": retries + 1}
+                        if engine_ref:
+                            engine_ref.set_wh(f"{tag} FAIL(cola llena):{reason}")
+                else:
+                    _wh_results[track_id] = {"status": "fail", "retries": retries}
+                    if engine_ref:
+                        engine_ref.set_wh(f"{tag} FAIL:{reason} ({retries}x)")
+
+        _wh_queue.task_done()
+
+
 # ── WEBHOOK ENGINE ────────────────────────────────────────────────────────────
 def _fire(state, ids_list):
     """Dispara un webhook del pool. Rota si 406 o error red. Devuelve (ok, reason, ms)."""
@@ -284,7 +334,7 @@ def _fire(state, ids_list):
         url = f"https://us-apia.coolkit.cc/v2/smartscene2/webhooks/execute?id={wid}"
         try:
             t0 = time.time()
-            r  = requests.get(url, timeout=6, headers=HTTP_HEADERS, allow_redirects=True)
+            r  = _http_session.get(url, timeout=3, allow_redirects=True)
             ms = int((time.time() - t0) * 1000)
 
             if not (200 <= r.status_code < 300):
@@ -296,7 +346,7 @@ def _fire(state, ids_list):
                 err = d.get("error")
                 if err == 0:
                     state["calls"][wid] = state["calls"].get(wid, 0) + 1
-                    state["last_idx"]   = i
+                    state["last_idx"]   = (i + 1) % n
                     _save_state()
                     return True, "ok", ms
                 if err == 406:
@@ -309,7 +359,7 @@ def _fire(state, ids_list):
                 continue
             except Exception:
                 state["calls"][wid] = state["calls"].get(wid, 0) + 1
-                state["last_idx"]   = i
+                state["last_idx"]   = (i + 1) % n
                 _save_state()
                 return True, f"ok_{r.status_code}", ms
 
@@ -434,6 +484,10 @@ class DetectionEngine:
 
     def stop(self):
         self.stop_event.set()
+        try:
+            _wh_queue.put_nowait(None)   # Poison pill → detener worker
+        except queue.Full:
+            pass
         self.set_status("DESACTIVADO")
 
     # ── YOLO detect helper ────────────────────────────────────────────────────
@@ -499,11 +553,9 @@ class DetectionEngine:
         fps_s        = 0.0
         prev_t       = time.time()
 
-        def _fire_open_async(tag="SUBIR"):
-            def _open():
-                ok, reason, ms = pulso_subir()
-                self.set_wh(f"{tag} {'OK' if ok else 'FAIL'}:{reason} ({ms}ms)")
-            threading.Thread(target=_open, daemon=True).start()
+        # Worker persistente para webhooks (reemplaza thread-per-request)
+        wh_worker_thread = threading.Thread(target=_wh_worker, args=(self,), daemon=True)
+        wh_worker_thread.start()
 
         self.set_status("ACTIVO")
 
@@ -557,13 +609,36 @@ class DetectionEngine:
                     dead = [tid for tid, ts in fired_ids.items() if (now - ts) > FIRED_TTL_SEC]
                     for tid in dead:
                         fired_ids.pop(tid, None)
+                        with _wh_results_lock:
+                            _wh_results.pop(tid, None)
 
-                # Disparar SUBIR 1 vez por track id (vehículo)
+                # Disparar SUBIR 1 vez por track id (vehículo), con reintentos
                 for t in valid_exit_tracks:
-                    if t.id not in fired_ids:
-                        fired_ids[t.id] = now
+                    tid = t.id
+                    with _wh_results_lock:
+                        result = _wh_results.get(tid)
+
+                    if tid not in fired_ids:
+                        # Nunca disparado → encolar webhook
+                        fired_ids[tid] = now
                         last_open_t = now
-                        _fire_open_async("SUBIR")
+                        with _wh_results_lock:
+                            _wh_results[tid] = {"status": "pending", "retries": 0}
+                        try:
+                            _wh_queue.put_nowait((tid, "SUBIR", 0))
+                        except queue.Full:
+                            self.set_wh("SUBIR FAIL: cola llena")
+                            fired_ids.pop(tid, None)
+                    elif result and result["status"] == "fail":
+                        # Falló y agotó reintentos → re-encolar
+                        fired_ids[tid] = now
+                        last_open_t = now
+                        with _wh_results_lock:
+                            _wh_results[tid] = {"status": "pending", "retries": 0}
+                        try:
+                            _wh_queue.put_nowait((tid, "SUBIR-RETRY", 0))
+                        except queue.Full:
+                            pass
 
                 # Estado barrera (solo visual): se asume "abierta/subiendo" por X seg tras último SUBIR
                 barrier_open = (now - last_open_t) <= BARRIER_RISE_WAIT
