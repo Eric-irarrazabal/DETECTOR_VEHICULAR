@@ -396,6 +396,8 @@ class DetectionEngine:
         self._veh_in  = 0
         self._barrier = False
         self._phase   = "LIBRE"
+        self._fps     = 0.0
+        self._yolo_ms = 0
         # ROI/POLY
         self.monitor_index = DEFAULT_MONITOR_INDEX
         self.roi_xywh      = None
@@ -416,7 +418,8 @@ class DetectionEngine:
     def get_state(self):
         with self._lock:
             return (self._status, self._wh_txt, self._night,
-                    self._veh_in, self._barrier, self._phase)
+                    self._veh_in, self._barrier, self._phase,
+                    self._fps, self._yolo_ms)
 
     def get_frame(self):
         with self._lock:
@@ -665,6 +668,8 @@ class DetectionEngine:
                     self._veh_in  = veh_in_zone
                     self._barrier = barrier_open
                     self._phase   = phase
+                    self._fps     = fps_s
+                    self._yolo_ms = inf_ms
                     self.last_frame = frame
 
             except Exception as e:
@@ -904,7 +909,7 @@ class App(tk.Tk):
         self.engine.stop()
         self._vid_lbl.configure(image="")
         self._tkimg = None
-        self._refresh("DESACTIVADO", "LIBRE", False, False, 0, "N/A")
+        self._refresh("DESACTIVADO", "LIBRE", False, False, 0, "N/A", 0.0, 0)
 
     def _on_reconfig(self):
         self.engine.stop()
@@ -920,7 +925,7 @@ class App(tk.Tk):
         self.destroy()
 
     # ── refresco estado ───────────────────────────────────────────────────────
-    def _refresh(self, status, phase, night, barrier, veh_in, wh_txt):
+    def _refresh(self, status, phase, night, barrier, veh_in, wh_txt, fps, yolo_ms):
         C = COLORS
 
         # -- Sistema --
@@ -966,10 +971,14 @@ class App(tk.Tk):
             wh_fg = C["sub"]
         self._lbl_wh.configure(text=wh_txt, fg=wh_fg)
 
+        # -- Barra inferior: FPS y YOLO --
+        self._lbl_fps.configure(text=f"FPS: {fps:.1f}")
+        self._lbl_yolo.configure(text=f"YOLO: {yolo_ms}ms")
+
     # ── tick UI ───────────────────────────────────────────────────────────────
     def _tick(self):
-        status, wh_txt, night, veh_in, barrier, phase = self.engine.get_state()
-        self._refresh(status, phase, night, barrier, veh_in, wh_txt)
+        status, wh_txt, night, veh_in, barrier, phase, fps, yolo_ms = self.engine.get_state()
+        self._refresh(status, phase, night, barrier, veh_in, wh_txt, fps, yolo_ms)
 
         frame = self.engine.get_frame()
         if frame is not None and "ACTIVO" in status:
