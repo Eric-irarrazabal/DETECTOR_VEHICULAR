@@ -1,0 +1,29 @@
+{
+  "open": {
+    "last_idx": 3,
+    "exhausted": {
+      "7332b6c692284bddbc8b41154ea350ab": null,
+      "6290377639b949f3a5ac40303c463e0d": null,
+      "0f56cd5e899e4abcacd2d8adaf39b761": null,
+      "272c9e2f6ca74540bba26f3e93254309": null,
+      "838199dbb0af4de9a6221ee7eff8b970": null,
+      "70cad7d984684251b5afb4bb86587bad": null,
+      "99cf90d857c74b6d8746adb320936c73": null,
+      "b64adbb325a8424e9c7fedbc11a97382": null,
+      "bbaa9067ab064938aced336942829f84": null,
+      "b9b2124e43a34bbd9b2f4ed4672778c5": null
+    },
+    "calls": {
+      "7332b6c692284bddbc8b41154ea350ab": 189,
+      "6290377639b949f3a5ac40303c463e0d": 101,
+      "0f56cd5e899e4abcacd2d8adaf39b761": 97,
+      "272c9e2f6ca74540bba26f3e93254309": 50,
+      "838199dbb0af4de9a6221ee7eff8b970": 1,
+      "70cad7d984684251b5afb4bb86587bad": 1,
+      "99cf90d857c74b6d8746adb320936c73": 1,
+      "b64adbb325a8424e9c7fedbc11a97382": 1,
+      "bbaa9067ab064938aced336942829f84": 1,
+      "b9b2124e43a34bbd9b2f4ed4672778c5": 1
+    }
+  }
+}
