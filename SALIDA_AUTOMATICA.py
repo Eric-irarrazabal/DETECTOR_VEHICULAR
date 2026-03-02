@@ -677,17 +677,26 @@ class DetectionEngine:
 
 # ── UI ────────────────────────────────────────────────────────────────────────
 COLORS = {
-    "bg":     "#0D1B2A",
-    "bg2":    "#1B2A3B",
-    "accent": "#1D6FD8",
-    "green":  "#22C55E",
-    "red":    "#EF4444",
-    "yellow": "#EAB308",
-    "orange": "#F97316",
-    "cyan":   "#06B6D4",
-    "text":   "#E2E8F0",
-    "sub":    "#94A3B8",
+    "bg":      "#0F172A",
+    "bg2":     "#1E293B",
+    "card":    "#1E293B",
+    "card_br": "#334155",
+    "accent":  "#3B82F6",
+    "green":   "#22C55E",
+    "red":     "#EF4444",
+    "yellow":  "#EAB308",
+    "orange":  "#F97316",
+    "cyan":    "#06B6D4",
+    "text":    "#F1F5F9",
+    "sub":     "#94A3B8",
+    "dim":     "#475569",
+    "btn_stop": "#DC2626",
+    "btn_off":  "#374151",
 }
+
+# Fuente base (intenta Segoe UI, luego fallback)
+_FONT = "Segoe UI"
+
 
 class App(tk.Tk):
     def __init__(self):
@@ -707,105 +716,175 @@ class App(tk.Tk):
         self.after(40, self._tick)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
+    # ── helpers UI ────────────────────────────────────────────────────────────
+    def _make_card(self, parent, width=160):
+        """Crea un frame tipo tarjeta con borde redondeado simulado."""
+        card = tk.Frame(parent, bg=COLORS["card"], highlightbackground=COLORS["card_br"],
+                        highlightthickness=1, padx=12, pady=8)
+        card.configure(width=width)
+        return card
+
+    def _make_btn(self, parent, text, bg, fg, cmd, width=16):
+        """Crea un botón estilizado con hover."""
+        b = tk.Button(parent, text=text, bg=bg, fg=fg,
+                      relief="flat", bd=0, padx=18, pady=8,
+                      font=(_FONT, 10, "bold"), width=width,
+                      activebackground=bg, activeforeground=fg,
+                      cursor="hand2", command=cmd)
+        # Hover: aclarar color
+        def _enter(e, btn=b, base=bg):
+            try:
+                r, g, bl = btn.winfo_rgb(base)
+                lighter = f"#{min(r//256+25,255):02x}{min(g//256+25,255):02x}{min(bl//256+25,255):02x}"
+                btn.configure(bg=lighter)
+            except Exception:
+                pass
+        def _leave(e, btn=b, base=bg):
+            btn.configure(bg=base)
+        b.bind("<Enter>", _enter)
+        b.bind("<Leave>", _leave)
+        return b
+
     # ── construcción UI ──────────────────────────────────────────────────────
     def _build_ui(self):
         C = COLORS
 
-        # ── barra superior ────────────────────────────────────────────────────
-        top = tk.Frame(self, bg=C["bg2"], height=40)
-        top.pack(fill="x")
-        top.pack_propagate(False)
+        # ── HEADER ───────────────────────────────────────────────────────────
+        header = tk.Frame(self, bg=C["bg2"], height=48)
+        header.pack(fill="x")
+        header.pack_propagate(False)
 
-        tk.Label(top, text="● SALIDA AUTOMATICA v2",
+        tk.Label(header, text="SALIDA AUTOMATICA",
                  bg=C["bg2"], fg=C["accent"],
-                 font=("Segoe UI", 11, "bold")).pack(side="left", padx=10, pady=9)
+                 font=(_FONT, 14, "bold")).pack(side="left", padx=16, pady=10)
+        tk.Label(header, text="v2",
+                 bg=C["bg2"], fg=C["dim"],
+                 font=(_FONT, 10)).pack(side="left", pady=10)
 
         self._btn_toggle = tk.Button(
-            top, text="▲ Panel", bg=C["bg2"], fg=C["sub"],
-            relief="flat", bd=0, font=("Segoe UI", 9),
+            header, text="▲ Panel", bg=C["bg2"], fg=C["sub"],
+            relief="flat", bd=0, font=(_FONT, 9), cursor="hand2",
             command=self._toggle_panel)
-        self._btn_toggle.pack(side="right", padx=6)
+        self._btn_toggle.pack(side="right", padx=10)
 
-        tk.Label(top, text="ESC=ventana  F11=fullscreen",
-                 bg=C["bg2"], fg=C["sub"],
-                 font=("Segoe UI", 8)).pack(side="right", padx=8)
+        tk.Label(header, text="ESC ventana  |  F11 fullscreen",
+                 bg=C["bg2"], fg=C["dim"],
+                 font=(_FONT, 8)).pack(side="right", padx=10)
 
-        # ── panel control ─────────────────────────────────────────────────────
-        self._ctrl = tk.Frame(self, bg=C["bg"], pady=4)
+        # ── PANEL DE CONTROL ─────────────────────────────────────────────────
+        self._ctrl = tk.Frame(self, bg=C["bg"], pady=8)
         self._ctrl.pack(fill="x")
 
-        # fila LEDs
-        row1 = tk.Frame(self._ctrl, bg=C["bg"])
-        row1.pack(fill="x", padx=10, pady=(2, 0))
+        # ── Fila 1: Tarjetas de estado ────────────────────────────────────────
+        cards_row = tk.Frame(self._ctrl, bg=C["bg"])
+        cards_row.pack(fill="x", padx=16, pady=(4, 6))
 
-        def _led(parent, label):
-            tk.Label(parent, text=label, bg=C["bg"], fg=C["sub"],
-                     font=("Segoe UI", 8)).pack(side="left")
-            cv = tk.Canvas(parent, width=18, height=18,
-                           bg=C["bg"], highlightthickness=0)
-            cv.pack(side="left", padx=(3, 1))
-            oval = cv.create_oval(2, 2, 16, 16, fill=C["red"])
-            return cv, oval
+        # -- Tarjeta SISTEMA --
+        c_sys = self._make_card(cards_row)
+        c_sys.pack(side="left", padx=(0, 8), fill="y")
+        tk.Label(c_sys, text="SISTEMA", bg=C["card"], fg=C["dim"],
+                 font=(_FONT, 8, "bold")).pack(anchor="w")
+        sys_row = tk.Frame(c_sys, bg=C["card"])
+        sys_row.pack(anchor="w", pady=(4, 0))
+        self._led_sys_cv = tk.Canvas(sys_row, width=14, height=14,
+                                     bg=C["card"], highlightthickness=0)
+        self._led_sys_cv.pack(side="left", padx=(0, 6))
+        self._led_sys_o = self._led_sys_cv.create_oval(1, 1, 13, 13, fill=C["red"])
+        self._lbl_sys = tk.Label(sys_row, text="DESACTIVADO",
+                                 bg=C["card"], fg=C["text"],
+                                 font=(_FONT, 11, "bold"))
+        self._lbl_sys.pack(side="left")
 
-        self._led_sys_cv, self._led_sys_o = _led(row1, "SISTEMA:")
-        self._lbl_sys = tk.Label(row1, text="DESACTIVADO",
-                                 bg=C["bg"], fg=C["text"],
-                                 font=("Segoe UI", 9, "bold"))
-        self._lbl_sys.pack(side="left", padx=(2, 12))
+        # -- Tarjeta BARRERA --
+        c_bar = self._make_card(cards_row)
+        c_bar.pack(side="left", padx=(0, 8), fill="y")
+        tk.Label(c_bar, text="BARRERA", bg=C["card"], fg=C["dim"],
+                 font=(_FONT, 8, "bold")).pack(anchor="w")
+        bar_row = tk.Frame(c_bar, bg=C["card"])
+        bar_row.pack(anchor="w", pady=(4, 0))
+        self._led_bar_cv = tk.Canvas(bar_row, width=14, height=14,
+                                     bg=C["card"], highlightthickness=0)
+        self._led_bar_cv.pack(side="left", padx=(0, 6))
+        self._led_bar_o = self._led_bar_cv.create_oval(1, 1, 13, 13, fill=C["dim"])
+        self._lbl_bar = tk.Label(bar_row, text="LIBRE",
+                                 bg=C["card"], fg=C["sub"],
+                                 font=(_FONT, 11, "bold"))
+        self._lbl_bar.pack(side="left")
+        self._lbl_phase = tk.Label(c_bar, text="",
+                                   bg=C["card"], fg=C["dim"],
+                                   font=(_FONT, 8))
+        self._lbl_phase.pack(anchor="w")
 
-        self._led_bar_cv, self._led_bar_o = _led(row1, "BARRERA:")
-        self._lbl_bar = tk.Label(row1, text="LIBRE",
-                                 bg=C["bg"], fg=C["sub"],
-                                 font=("Segoe UI", 9, "bold"))
-        self._lbl_bar.pack(side="left", padx=(2, 12))
+        # -- Tarjeta MODO --
+        c_mode = self._make_card(cards_row)
+        c_mode.pack(side="left", padx=(0, 8), fill="y")
+        tk.Label(c_mode, text="MODO", bg=C["card"], fg=C["dim"],
+                 font=(_FONT, 8, "bold")).pack(anchor="w")
+        self._lbl_mode = tk.Label(c_mode, text="DIA",
+                                  bg=C["card"], fg=C["yellow"],
+                                  font=(_FONT, 13, "bold"))
+        self._lbl_mode.pack(anchor="w", pady=(2, 0))
 
-        tk.Label(row1, text="FASE:", bg=C["bg"], fg=C["sub"],
-                 font=("Segoe UI", 8)).pack(side="left")
-        self._lbl_phase = tk.Label(row1, text="—",
-                                   bg=C["bg"], fg=C["sub"],
-                                   font=("Segoe UI", 9, "bold"))
-        self._lbl_phase.pack(side="left", padx=(3, 12))
+        # -- Tarjeta VEHICULOS --
+        c_veh = self._make_card(cards_row)
+        c_veh.pack(side="left", padx=(0, 8), fill="y")
+        tk.Label(c_veh, text="VEHICULOS EN ZONA", bg=C["card"], fg=C["dim"],
+                 font=(_FONT, 8, "bold")).pack(anchor="w")
+        self._lbl_veh = tk.Label(c_veh, text="0",
+                                 bg=C["card"], fg=C["sub"],
+                                 font=(_FONT, 22, "bold"))
+        self._lbl_veh.pack(anchor="w")
 
-        tk.Label(row1, text="MODO:", bg=C["bg"], fg=C["sub"],
-                 font=("Segoe UI", 8)).pack(side="left")
-        self._lbl_mode = tk.Label(row1, text="DÍA ☀",
-                                  bg=C["bg"], fg=C["yellow"],
-                                  font=("Segoe UI", 9, "bold"))
-        self._lbl_mode.pack(side="left", padx=(3, 12))
+        # -- Tarjeta WEBHOOK --
+        c_wh = self._make_card(cards_row)
+        c_wh.pack(side="left", fill="both", expand=True)
+        tk.Label(c_wh, text="ULTIMO WEBHOOK", bg=C["card"], fg=C["dim"],
+                 font=(_FONT, 8, "bold")).pack(anchor="w")
+        self._lbl_wh = tk.Label(c_wh, text="N/A",
+                                bg=C["card"], fg=C["sub"],
+                                font=(_FONT, 10))
+        self._lbl_wh.pack(anchor="w", pady=(4, 0))
 
-        tk.Label(row1, text="VEH:", bg=C["bg"], fg=C["sub"],
-                 font=("Segoe UI", 8)).pack(side="left")
-        self._lbl_veh = tk.Label(row1, text="0",
-                                 bg=C["bg"], fg=C["sub"],
-                                 font=("Segoe UI", 10, "bold"))
-        self._lbl_veh.pack(side="left", padx=(3, 12))
+        # ── Fila 2: Botones ───────────────────────────────────────────────────
+        btn_row = tk.Frame(self._ctrl, bg=C["bg"])
+        btn_row.pack(pady=(4, 4))
 
-        self._lbl_wh = tk.Label(row1, text="WH: N/A",
-                                bg=C["bg"], fg=C["sub"],
-                                font=("Segoe UI", 8))
-        self._lbl_wh.pack(side="left")
+        self._btn_act = self._make_btn(btn_row, "ACTIVAR", C["accent"], "white",
+                                       self._on_activate)
+        self._btn_act.pack(side="left", padx=4)
 
-        # fila botones
-        self._row2 = tk.Frame(self._ctrl, bg=C["bg"])
-        self._row2.pack(pady=(4, 4))
+        self._btn_deact = self._make_btn(btn_row, "DESACTIVAR", C["btn_off"], C["sub"],
+                                         self._on_deactivate)
+        self._btn_deact.pack(side="left", padx=4)
 
-        def _btn(text, bg, cmd, col, fg="white"):
-            b = tk.Button(self._row2, text=text, bg=bg, fg=fg,
-                          relief="flat", bd=0, padx=14, pady=5,
-                          font=("Segoe UI", 9, "bold"),
-                          activebackground=bg, command=cmd)
-            b.grid(row=0, column=col, padx=5)
-            return b
+        self._btn_reconf = self._make_btn(btn_row, "RECONFIGURAR", C["bg2"], C["sub"],
+                                          self._on_reconfig, width=14)
+        self._btn_reconf.pack(side="left", padx=4)
 
-        _btn("▶ ACTIVAR",       C["accent"], self._on_activate,   0)
-        _btn("■ DESACTIVAR",    "#374151",   self._on_deactivate, 1)
-        _btn("⚙ Reconfigurar",  "#1F2937",   self._on_reconfig,   2, C["sub"])
-
-        # ── área video ────────────────────────────────────────────────────────
+        # ── AREA VIDEO ────────────────────────────────────────────────────────
         self._vid_frame = tk.Frame(self, bg="#000")
         self._vid_frame.pack(fill="both", expand=True)
         self._vid_lbl = tk.Label(self._vid_frame, bg="#000")
         self._vid_lbl.pack(fill="both", expand=True)
+
+        # ── BARRA INFERIOR (info técnica) ─────────────────────────────────────
+        self._statusbar = tk.Frame(self, bg=C["bg2"], height=28)
+        self._statusbar.pack(fill="x", side="bottom")
+        self._statusbar.pack_propagate(False)
+
+        self._lbl_fps = tk.Label(self._statusbar, text="FPS: --",
+                                 bg=C["bg2"], fg=C["dim"],
+                                 font=(_FONT, 8))
+        self._lbl_fps.pack(side="left", padx=(16, 12))
+
+        self._lbl_yolo = tk.Label(self._statusbar, text="YOLO: --",
+                                  bg=C["bg2"], fg=C["dim"],
+                                  font=(_FONT, 8))
+        self._lbl_yolo.pack(side="left", padx=(0, 12))
+
+        tk.Label(self._statusbar, text="SALIDA AUTOMATICA v2",
+                 bg=C["bg2"], fg=C["dim"],
+                 font=(_FONT, 8)).pack(side="right", padx=16)
 
     # ── callbacks ────────────────────────────────────────────────────────────
     def _toggle_panel(self):
@@ -818,7 +897,7 @@ class App(tk.Tk):
         self._panel_vis = not self._panel_vis
 
     def _on_activate(self):
-        self._lbl_sys.configure(text="ACTIVANDO…", fg=COLORS["yellow"])
+        self._lbl_sys.configure(text="ACTIVANDO...", fg=COLORS["yellow"])
         self.engine.start()
 
     def _on_deactivate(self):
@@ -840,11 +919,11 @@ class App(tk.Tk):
             pass
         self.destroy()
 
-    # ── refresco LEDs ─────────────────────────────────────────────────────────
+    # ── refresco estado ───────────────────────────────────────────────────────
     def _refresh(self, status, phase, night, barrier, veh_in, wh_txt):
         C = COLORS
 
-        # LED sistema
+        # -- Sistema --
         if "ACTIVO" in status:
             sc, st = C["green"], C["green"]
         elif any(x in status for x in ("ACTIVANDO", "Config", "Selecciona")):
@@ -854,28 +933,38 @@ class App(tk.Tk):
         self._led_sys_cv.itemconfig(self._led_sys_o, fill=sc)
         self._lbl_sys.configure(text=status, fg=st)
 
-        # LED barrera + fase
-        phase_cfg = {
-            "LIBRE":    (C["sub"],  "LIBRE",    C["sub"]),
-            "SUBIENDO": (C["cyan"], "ABIERTA",  C["cyan"]),
-        }
-        bc, bt, btc = phase_cfg.get(phase, (C["sub"], "—", C["sub"]))
+        # -- Barrera --
+        if phase == "SUBIENDO":
+            bc   = C["cyan"]
+            btxt = "ABIERTA"
+            ptxt = "Barrera subiendo..."
+        else:
+            bc   = C["dim"]
+            btxt = "CERRADA"
+            ptxt = ""
         self._led_bar_cv.itemconfig(self._led_bar_o, fill=bc)
-        self._lbl_bar.configure(text=bt, fg=btc)
-        self._lbl_phase.configure(text=phase, fg=bc)
+        self._lbl_bar.configure(text=btxt, fg=bc)
+        self._lbl_phase.configure(text=ptxt, fg=bc)
 
-        # modo
-        self._lbl_mode.configure(
-            text="NOCHE 🌙" if night else "DÍA ☀",
-            fg=C["sub"] if night else C["yellow"])
+        # -- Modo --
+        if night:
+            self._lbl_mode.configure(text="NOCHE", fg=C["sub"])
+        else:
+            self._lbl_mode.configure(text="DIA", fg=C["yellow"])
 
-        # vehículos
+        # -- Vehiculos --
         self._lbl_veh.configure(
             text=str(veh_in),
             fg=C["green"] if veh_in > 0 else C["sub"])
 
-        # webhook
-        self._lbl_wh.configure(text=f"WH: {wh_txt}")
+        # -- Webhook --
+        if "OK" in wh_txt:
+            wh_fg = C["green"]
+        elif "FAIL" in wh_txt:
+            wh_fg = C["red"]
+        else:
+            wh_fg = C["sub"]
+        self._lbl_wh.configure(text=wh_txt, fg=wh_fg)
 
     # ── tick UI ───────────────────────────────────────────────────────────────
     def _tick(self):
