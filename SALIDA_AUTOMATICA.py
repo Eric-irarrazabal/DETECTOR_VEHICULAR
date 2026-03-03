@@ -409,18 +409,17 @@ def pulso_subir():
     return _fire(_open_state, open_ids)
 
 # ── WEBHOOKS DETENER ─────────────────────────────────────────────────────────
-# IMPORTANTE: Reemplaza estos placeholders con tus 10 IDs reales de DETENER
 RAW_STOP_IDS = [
-    "PLACEHOLDER_DETENER_01",
-    "PLACEHOLDER_DETENER_02",
-    "PLACEHOLDER_DETENER_03",
-    "PLACEHOLDER_DETENER_04",
-    "PLACEHOLDER_DETENER_05",
-    "PLACEHOLDER_DETENER_06",
-    "PLACEHOLDER_DETENER_07",
-    "PLACEHOLDER_DETENER_08",
-    "PLACEHOLDER_DETENER_09",
-    "PLACEHOLDER_DETENER_10",
+    "842aa4ae223145db8bcb07bca0836809",
+    "00c4d8ac02604c0799fd15543df27c1d",
+    "21d0a215ca7e419a8de7258578e45a56",
+    "d2599ffeeab341069a0212abfa7079a8",
+    "ced312674a5e4161a74017f3bcf066da",
+    "c716df1ef6ad44c98eb6e49ea4ec3fe2",
+    "da129d9f83f34fdbb0eb532730a5614d",
+    "1b029fb7e8684b5da5d4cde097935bac",
+    "6cc854c0656e47b3a1166618d2b2f045",
+    "ac2d4c3ea2e243a0bcf3319e4a8ba76a",
 ]
 
 stop_ids = list(dict.fromkeys(RAW_STOP_IDS))
