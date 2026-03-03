@@ -60,9 +60,8 @@ MIN_MOVEMENT_UP         = 8
 # Temporización barrera
 BARRIER_RISE_WAIT       = 5.5   # seg tras SUBIR para dar tiempo a que suba
 
-# Keep-alive: ciclo DETENER→SUBIR mientras haya vehículos en zona
-KEEPALIVE_INTERVAL      = 6.0   # seg entre ciclos keep-alive (después de subida completa)
-KEEPALIVE_DET_DELAY     = 1.5   # seg de espera entre ráfaga DETENER y ráfaga SUBIR
+# Keep-alive: ráfagas periódicas de SUBIR mientras haya vehículos en zona
+KEEPALIVE_INTERVAL      = 8.0   # seg entre ráfagas keep-alive de SUBIR
 
 # Ráfagas de pulsos (simula mantener presionado el botón ~5seg)
 PULSES_PER_ACTION       = 6     # pulsos por acción (SUBIR o DETENER)
@@ -242,6 +241,7 @@ def _load_state():
             return
         d    = json.loads(STATE_FILE.read_text(encoding="utf-8"))
         now  = datetime.now()
+        # Cargar estado SUBIR
         si   = d.get("open", {})
         _open_state["last_idx"] = int(si.get("last_idx", 0)) % max(1, len(open_ids))
         for wid in open_ids:
@@ -251,6 +251,16 @@ def _load_state():
             c = si.get("calls", {}).get(wid)
             if c is not None:
                 _open_state["calls"][wid] = int(c)
+        # Cargar estado DETENER
+        sd   = d.get("stop", {})
+        _stop_state["last_idx"] = int(sd.get("last_idx", 0)) % max(1, len(stop_ids))
+        for wid in stop_ids:
+            v = sd.get("exhausted", {}).get(wid)
+            exp = datetime.fromisoformat(v) if v else None
+            _stop_state["exhausted"][wid] = exp if (exp and exp > now) else None
+            c = sd.get("calls", {}).get(wid)
+            if c is not None:
+                _stop_state["calls"][wid] = int(c)
     except Exception:
         pass
 
@@ -264,7 +274,8 @@ def _save_state():
                 "calls":     state["calls"],
             }
         STATE_FILE.write_text(
-            json.dumps({"open": _ser(_open_state)}, indent=2, ensure_ascii=False),
+            json.dumps({"open": _ser(_open_state), "stop": _ser(_stop_state)},
+                       indent=2, ensure_ascii=False),
             encoding="utf-8"
         )
     except Exception:
@@ -712,30 +723,21 @@ class DetectionEngine:
                 barrier_up       = last_open_t > 0 and time_since_subir > BARRIER_RISE_WAIT
 
                 if veh_in_zone > 0 and barrier_up:
-                    # Barrera ya subió y hay vehículos → ciclo keep-alive con ráfagas
+                    # Barrera ya subió y hay vehículos → SUBIR periódico
                     if ka_step == "idle":
-                        # Iniciar ciclo: enviar ráfaga DETENER
-                        n = _enqueue_burst("KA", "DETENER")
-                        self.set_wh(f"KA: DETENER x{n} pulsos")
+                        # Primera ráfaga keep-alive
+                        n = _enqueue_burst("KA", "SUBIR-KA")
+                        self.set_wh(f"KA: SUBIR x{n} pulsos")
+                        last_open_t = now
                         ka_t = now
-                        ka_step = "wait_subir"
+                        ka_step = "active"
 
-                    elif ka_step == "wait_subir":
-                        # Ráfaga DETENER enviada, esperar antes de ráfaga SUBIR
-                        if (now - ka_t) >= KEEPALIVE_DET_DELAY:
+                    elif ka_step == "active":
+                        if (now - ka_t) >= KEEPALIVE_INTERVAL:
                             n = _enqueue_burst("KA", "SUBIR-KA")
                             self.set_wh(f"KA: SUBIR x{n} pulsos")
-                            last_open_t = now   # reset timer de barrera
+                            last_open_t = now
                             ka_t = now
-                            ka_step = "wait_detener"
-
-                    elif ka_step == "wait_detener":
-                        # Ráfaga SUBIR enviada, esperar intervalo para próximo DETENER
-                        if (now - ka_t) >= KEEPALIVE_INTERVAL:
-                            n = _enqueue_burst("KA", "DETENER")
-                            self.set_wh(f"KA: DETENER x{n} pulsos")
-                            ka_t = now
-                            ka_step = "wait_subir"
 
                     phase = "KEEPALIVE"
 
