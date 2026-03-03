@@ -1,10 +1,13 @@
 """
-SALIDA AUTOMATICA v2 (SIN DETENER)
-=================================
+SALIDA AUTOMATICA v2 (CON DETENER / KEEP-ALIVE)
+================================================
 Flujo de barrera:
   1) Vehículo detectado en zona SALIENDO (↑) dentro del polígono → 1 pulso SUBIR
-  2) Un pulso SUBIR por cada vehículo (si pasan 4, sube 4)
-  3) No existe DETENER. Si no hay vehículos, no se envía nada y la barrera baja sola.
+  2) Un pulso SUBIR por cada vehículo nuevo detectado
+  3) Si hay vehículos aún en zona después de que la barrera subió completamente:
+     → Ciclo keep-alive: DETENER (frena barrera) → espera → SUBIR (re-sube)
+     → Se repite mientras haya vehículos en la zona
+  4) Cuando no hay vehículos → se deja que la barrera baje sola
 
 Mejoras:
   - Modo noche automático (CLAHE + conf baja)
@@ -57,8 +60,12 @@ MIN_MOVEMENT_UP         = 8
 # Temporización barrera
 BARRIER_RISE_WAIT       = 5.5   # seg tras SUBIR para dar tiempo a que suba
 
+# Keep-alive: ciclo DETENER→SUBIR mientras haya vehículos en zona
+KEEPALIVE_INTERVAL      = 6.0   # seg entre ciclos keep-alive (después de subida completa)
+KEEPALIVE_DET_DELAY     = 1.5   # seg de espera entre DETENER y SUBIR dentro del ciclo
+
 # Limpieza de IDs disparados (para no crecer infinito)
-FIRED_TTL_SEC           = 12.0  # recordar track_id disparado por X seg
+FIRED_TTL_SEC           = 30.0  # recordar track_id disparado por X seg (ampliado para keep-alive)
 
 DEFAULT_MONITOR_INDEX   = 2
 
@@ -270,7 +277,8 @@ _wh_results_lock = threading.Lock()
 
 
 def _wh_worker(engine_ref):
-    """Worker persistente: procesa webhooks de la cola con reintentos."""
+    """Worker persistente: procesa webhooks de la cola con reintentos.
+    Despacha a pulso_subir() o pulso_detener() según el tag."""
     while True:
         try:
             item = _wh_queue.get(timeout=2.0)
@@ -281,7 +289,12 @@ def _wh_worker(engine_ref):
             break
 
         track_id, tag, retries = item
-        ok, reason, ms = pulso_subir()
+
+        # Despachar según tipo de acción
+        if "DETENER" in tag:
+            ok, reason, ms = pulso_detener()
+        else:
+            ok, reason, ms = pulso_subir()
 
         with _wh_results_lock:
             if ok:
@@ -371,6 +384,32 @@ def _fire(state, ids_list):
 
 def pulso_subir():
     return _fire(_open_state, open_ids)
+
+# ── WEBHOOKS DETENER ─────────────────────────────────────────────────────────
+# IMPORTANTE: Reemplaza estos placeholders con tus 10 IDs reales de DETENER
+RAW_STOP_IDS = [
+    "PLACEHOLDER_DETENER_01",
+    "PLACEHOLDER_DETENER_02",
+    "PLACEHOLDER_DETENER_03",
+    "PLACEHOLDER_DETENER_04",
+    "PLACEHOLDER_DETENER_05",
+    "PLACEHOLDER_DETENER_06",
+    "PLACEHOLDER_DETENER_07",
+    "PLACEHOLDER_DETENER_08",
+    "PLACEHOLDER_DETENER_09",
+    "PLACEHOLDER_DETENER_10",
+]
+
+stop_ids = list(dict.fromkeys(RAW_STOP_IDS))
+
+_stop_state = {
+    "last_idx":  0,
+    "exhausted": {w: None for w in stop_ids},
+    "calls":     {w: 0    for w in stop_ids},
+}
+
+def pulso_detener():
+    return _fire(_stop_state, stop_ids)
 
 # ── YOLO ──────────────────────────────────────────────────────────────────────
 with open(YOLO_NAMES, encoding="utf-8") as _f:
@@ -549,12 +588,16 @@ class DetectionEngine:
         tracker = CentroidTracker()
         clahe   = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
 
-        # ── lógica SUBIR por vehículo (sin DETENER) ───────────────────────────
-        phase        = "LIBRE"   # UI: LIBRE / SUBIENDO
+        # ── lógica SUBIR + DETENER keep-alive ─────────────────────────────────
+        phase        = "LIBRE"   # UI: LIBRE / SUBIENDO / KEEPALIVE
         last_open_t  = 0.0
         fired_ids    = {}        # track_id -> timestamp último disparo
         fps_s        = 0.0
         prev_t       = time.time()
+
+        # Keep-alive state machine: idle → wait_subir → wait_detener → ...
+        ka_step      = "idle"    # "idle" | "wait_subir" | "wait_detener"
+        ka_t         = 0.0       # timestamp última acción keep-alive
 
         # Worker persistente para webhooks (reemplaza thread-per-request)
         wh_worker_thread = threading.Thread(target=_wh_worker, args=(self,), daemon=True)
@@ -643,9 +686,60 @@ class DetectionEngine:
                         except queue.Full:
                             pass
 
-                # Estado barrera (solo visual): se asume "abierta/subiendo" por X seg tras último SUBIR
-                barrier_open = (now - last_open_t) <= BARRIER_RISE_WAIT
-                phase = "SUBIENDO" if barrier_open else "LIBRE"
+                # ── Estado barrera + Keep-alive ────────────────────────────────
+                time_since_subir = now - last_open_t
+                barrier_rising   = last_open_t > 0 and time_since_subir <= BARRIER_RISE_WAIT
+                barrier_up       = last_open_t > 0 and time_since_subir > BARRIER_RISE_WAIT
+
+                if veh_in_zone > 0 and barrier_up:
+                    # Barrera ya subió y hay vehículos → ciclo keep-alive
+                    if ka_step == "idle":
+                        # Iniciar ciclo: enviar DETENER
+                        try:
+                            _wh_queue.put_nowait(("KA", "DETENER", 0))
+                            self.set_wh("KA: DETENER enviado")
+                        except queue.Full:
+                            pass
+                        ka_t = now
+                        ka_step = "wait_subir"
+
+                    elif ka_step == "wait_subir":
+                        # DETENER fue enviado, esperar antes de SUBIR
+                        if (now - ka_t) >= KEEPALIVE_DET_DELAY:
+                            try:
+                                _wh_queue.put_nowait(("KA", "SUBIR-KA", 0))
+                                self.set_wh("KA: SUBIR enviado")
+                            except queue.Full:
+                                pass
+                            last_open_t = now   # reset timer de barrera
+                            ka_t = now
+                            ka_step = "wait_detener"
+
+                    elif ka_step == "wait_detener":
+                        # SUBIR fue enviado, esperar intervalo completo para próximo DETENER
+                        if (now - ka_t) >= KEEPALIVE_INTERVAL:
+                            try:
+                                _wh_queue.put_nowait(("KA", "DETENER", 0))
+                                self.set_wh("KA: DETENER enviado")
+                            except queue.Full:
+                                pass
+                            ka_t = now
+                            ka_step = "wait_subir"
+
+                    phase = "KEEPALIVE"
+
+                elif barrier_rising:
+                    phase = "SUBIENDO"
+                    # No tocar keep-alive mientras sube (NUNCA enviar DETENER aquí)
+
+                else:
+                    # Sin vehículos o barrera ya bajó → reset keep-alive
+                    if ka_step != "idle":
+                        ka_step = "idle"
+                        ka_t = 0.0
+                    phase = "LIBRE"
+
+                barrier_open = phase != "LIBRE"
 
                 # HUD
                 cv2.polylines(frame, [poly_sc], True, (0, 255, 255), 2)
@@ -654,12 +748,17 @@ class DetectionEngine:
                 fps_s = fps_s * 0.85 + (1.0 / max(1e-6, dt)) * 0.15
 
                 mode_t = "NOCHE" if night else "DIA"
-                pc = (0, 200, 255) if phase == "SUBIENDO" else (80, 80, 80)
+                if phase == "KEEPALIVE":
+                    pc = (0, 165, 255)   # naranja: keep-alive activo
+                elif phase == "SUBIENDO":
+                    pc = (0, 200, 255)   # cyan: subiendo
+                else:
+                    pc = (80, 80, 80)    # gris: libre
 
                 cv2.putText(frame, f"FPS:{fps_s:.1f}  YOLO:{inf_ms}ms  {mode_t}",
                             (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.58,
                             (50, 255, 50), 1, cv2.LINE_AA)
-                cv2.putText(frame, f"FASE: {phase}  Veh:{veh_in_zone}",
+                cv2.putText(frame, f"FASE: {phase}  Veh:{veh_in_zone}  KA:{ka_step}",
                             (8, 44), cv2.FONT_HERSHEY_SIMPLEX, 0.58,
                             pc, 2, cv2.LINE_AA)
 
@@ -939,9 +1038,13 @@ class App(tk.Tk):
         self._lbl_sys.configure(text=status, fg=st)
 
         # -- Barrera --
-        if phase == "SUBIENDO":
-            bc   = C["cyan"]
+        if phase == "KEEPALIVE":
+            bc   = C["orange"]
             btxt = "ABIERTA"
+            ptxt = "Keep-alive activo (DETENER/SUBIR)"
+        elif phase == "SUBIENDO":
+            bc   = C["cyan"]
+            btxt = "SUBIENDO"
             ptxt = "Barrera subiendo..."
         else:
             bc   = C["dim"]
