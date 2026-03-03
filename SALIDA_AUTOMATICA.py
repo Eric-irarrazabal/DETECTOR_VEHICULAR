@@ -62,7 +62,11 @@ BARRIER_RISE_WAIT       = 5.5   # seg tras SUBIR para dar tiempo a que suba
 
 # Keep-alive: ciclo DETENER→SUBIR mientras haya vehículos en zona
 KEEPALIVE_INTERVAL      = 6.0   # seg entre ciclos keep-alive (después de subida completa)
-KEEPALIVE_DET_DELAY     = 1.5   # seg de espera entre DETENER y SUBIR dentro del ciclo
+KEEPALIVE_DET_DELAY     = 1.5   # seg de espera entre ráfaga DETENER y ráfaga SUBIR
+
+# Ráfagas de pulsos (simula mantener presionado el botón ~5seg)
+PULSES_PER_ACTION       = 6     # pulsos por acción (SUBIR o DETENER)
+PULSE_DELAY             = 0.5   # seg entre pulsos consecutivos (6 × 0.5 ≈ 3-5seg total)
 
 # Limpieza de IDs disparados (para no crecer infinito)
 FIRED_TTL_SEC           = 30.0  # recordar track_id disparado por X seg (ampliado para keep-alive)
@@ -269,16 +273,31 @@ def _save_state():
 _load_state()
 
 # ── COLA Y WORKER DE WEBHOOKS ────────────────────────────────────────────────
-_wh_queue        = queue.Queue(maxsize=50)
+_wh_queue        = queue.Queue(maxsize=120)  # más grande para ráfagas
 _WH_MAX_RETRIES  = 3
 _WH_RETRY_DELAY  = 0.5   # seg entre reintentos
 _wh_results      = {}     # track_id -> {"status": "pending"|"ok"|"fail", "retries": int}
 _wh_results_lock = threading.Lock()
 
 
+def _enqueue_burst(track_id, tag, count=None):
+    """Encola una ráfaga de N pulsos para simular presión sostenida."""
+    if count is None:
+        count = PULSES_PER_ACTION
+    enqueued = 0
+    for i in range(count):
+        try:
+            _wh_queue.put_nowait((track_id, f"{tag}[{i+1}/{count}]", 0))
+            enqueued += 1
+        except queue.Full:
+            break
+    return enqueued
+
+
 def _wh_worker(engine_ref):
     """Worker persistente: procesa webhooks de la cola con reintentos.
-    Despacha a pulso_subir() o pulso_detener() según el tag."""
+    Despacha a pulso_subir() o pulso_detener() según el tag.
+    Espera PULSE_DELAY entre pulsos exitosos (simula presión sostenida)."""
     while True:
         try:
             item = _wh_queue.get(timeout=2.0)
@@ -300,7 +319,7 @@ def _wh_worker(engine_ref):
             if ok:
                 _wh_results[track_id] = {"status": "ok", "retries": retries}
                 if engine_ref:
-                    engine_ref.set_wh(f"{tag} OK:{reason} ({ms}ms)")
+                    engine_ref.set_wh(f"{tag} OK ({ms}ms)")
             else:
                 if retries < _WH_MAX_RETRIES:
                     _wh_results[track_id] = {"status": "pending", "retries": retries + 1}
@@ -317,6 +336,10 @@ def _wh_worker(engine_ref):
                         engine_ref.set_wh(f"{tag} FAIL:{reason} ({retries}x)")
 
         _wh_queue.task_done()
+
+        # Pausa entre pulsos consecutivos (simula presión sostenida)
+        if ok:
+            time.sleep(PULSE_DELAY)
 
 
 # ── WEBHOOK ENGINE ────────────────────────────────────────────────────────────
@@ -658,33 +681,31 @@ class DetectionEngine:
                         with _wh_results_lock:
                             _wh_results.pop(tid, None)
 
-                # Disparar SUBIR 1 vez por track id (vehículo), con reintentos
+                # Disparar ráfaga SUBIR 1 vez por track id (vehículo)
                 for t in valid_exit_tracks:
                     tid = t.id
                     with _wh_results_lock:
                         result = _wh_results.get(tid)
 
                     if tid not in fired_ids:
-                        # Nunca disparado → encolar webhook
+                        # Nunca disparado → encolar ráfaga de SUBIR
                         fired_ids[tid] = now
                         last_open_t = now
                         with _wh_results_lock:
                             _wh_results[tid] = {"status": "pending", "retries": 0}
-                        try:
-                            _wh_queue.put_nowait((tid, "SUBIR", 0))
-                        except queue.Full:
+                        n = _enqueue_burst(tid, "SUBIR")
+                        if n == 0:
                             self.set_wh("SUBIR FAIL: cola llena")
                             fired_ids.pop(tid, None)
+                        else:
+                            self.set_wh(f"SUBIR: {n} pulsos encolados")
                     elif result and result["status"] == "fail":
-                        # Falló y agotó reintentos → re-encolar
+                        # Falló y agotó reintentos → re-encolar ráfaga
                         fired_ids[tid] = now
                         last_open_t = now
                         with _wh_results_lock:
                             _wh_results[tid] = {"status": "pending", "retries": 0}
-                        try:
-                            _wh_queue.put_nowait((tid, "SUBIR-RETRY", 0))
-                        except queue.Full:
-                            pass
+                        _enqueue_burst(tid, "SUBIR-RETRY")
 
                 # ── Estado barrera + Keep-alive ────────────────────────────────
                 time_since_subir = now - last_open_t
@@ -692,37 +713,28 @@ class DetectionEngine:
                 barrier_up       = last_open_t > 0 and time_since_subir > BARRIER_RISE_WAIT
 
                 if veh_in_zone > 0 and barrier_up:
-                    # Barrera ya subió y hay vehículos → ciclo keep-alive
+                    # Barrera ya subió y hay vehículos → ciclo keep-alive con ráfagas
                     if ka_step == "idle":
-                        # Iniciar ciclo: enviar DETENER
-                        try:
-                            _wh_queue.put_nowait(("KA", "DETENER", 0))
-                            self.set_wh("KA: DETENER enviado")
-                        except queue.Full:
-                            pass
+                        # Iniciar ciclo: enviar ráfaga DETENER
+                        n = _enqueue_burst("KA", "DETENER")
+                        self.set_wh(f"KA: DETENER x{n} pulsos")
                         ka_t = now
                         ka_step = "wait_subir"
 
                     elif ka_step == "wait_subir":
-                        # DETENER fue enviado, esperar antes de SUBIR
+                        # Ráfaga DETENER enviada, esperar antes de ráfaga SUBIR
                         if (now - ka_t) >= KEEPALIVE_DET_DELAY:
-                            try:
-                                _wh_queue.put_nowait(("KA", "SUBIR-KA", 0))
-                                self.set_wh("KA: SUBIR enviado")
-                            except queue.Full:
-                                pass
+                            n = _enqueue_burst("KA", "SUBIR-KA")
+                            self.set_wh(f"KA: SUBIR x{n} pulsos")
                             last_open_t = now   # reset timer de barrera
                             ka_t = now
                             ka_step = "wait_detener"
 
                     elif ka_step == "wait_detener":
-                        # SUBIR fue enviado, esperar intervalo completo para próximo DETENER
+                        # Ráfaga SUBIR enviada, esperar intervalo para próximo DETENER
                         if (now - ka_t) >= KEEPALIVE_INTERVAL:
-                            try:
-                                _wh_queue.put_nowait(("KA", "DETENER", 0))
-                                self.set_wh("KA: DETENER enviado")
-                            except queue.Full:
-                                pass
+                            n = _enqueue_burst("KA", "DETENER")
+                            self.set_wh(f"KA: DETENER x{n} pulsos")
                             ka_t = now
                             ka_step = "wait_subir"
 
